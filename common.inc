@@ -420,6 +420,10 @@ EXTERNDEF Gfx_Iris:PROC         ; rcx = dst, rdx = a, r8 = b, r9d = radius
 EXTERNDEF Gfx_DrawMask:PROC     ; rcx = DMASK *
 EXTERNDEF Msk_BoxBlur:PROC      ; rcx = pix, edx = w, r8d = h, r9d = radius
 EXTERNDEF Font_Render:PROC      ; rcx = FONTREQ *
+EXTERNDEF Font_FitMask:PROC     ; rcx = rendered FONTREQ, edx = max w, r8d = max h, r9d = minimum em
+EXTERNDEF Font_InkBounds:PROC   ; rcx = TXMASK -> eax/edx = first/exclusive last ink row, 0/0 if empty
+EXTERNDEF Font_RowPalInk:PROC   ; rcx = mask, rdx = row palette, r8 = keys -> eax/edx = ink bounds
+EXTERNDEF Font_Outline:PROC     ; rcx = source mask, rdx = output mask; one-pixel crisp contour
 EXTERNDEF Font_Glow:PROC        ; rcx = TXMASK * src, rdx = TXMASK * out, r8d = radius
 EXTERNDEF Font_RowPal:PROC      ; rcx = TXMASK *, rdx = dst DWORD[mask.h], r8 = gradient keys
 EXTERNDEF Msk_Radial:PROC       ; rcx = TXMASK * out, edx = size, r8d = power (1 | 2 | 3 = disc)

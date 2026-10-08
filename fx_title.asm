@@ -30,7 +30,13 @@ GRID_VCOL EQU 0030D8FFh
 REFL_COL  EQU 00FF7A5Ah
 TITLE_AT  EQU 1400                        ; title appears (ms)
 GLITCH_MS EQU 1300                        ; length of the glitch phase
-TXT_CY    EQU 118                         ; title centre row
+TXT_CY    EQU 118                         ; centre of the visible letters, not GDI's line box
+TITLE_EM  EQU 64                          ; was 50; render larger, never stretch a small bitmap
+TITLE_MIN EQU 32                          ; stop if a pathological fallback font cannot fit
+TITLE_MAX_W EQU SCR_W - 32                ; includes FONT_PAD on both sides
+TITLE_ROWS EQU 256                        ; capacity of the per-row colour / glitch tables
+TITLE_GLOW_R EQU 4                        ; was 7: compact neon, not a fog around the letters
+TITLE_SUB_GAP EQU 14                      ; minimum gap below the visible title body
 SIG_ROW   EQU SCR_H - 40                  ; top row of the credit line canvases
 
 ; Renders a string into a mask (rsi = FONTREQ *).
@@ -117,10 +123,15 @@ titMtnPalA  DWORD MTN_PAL DUP (?)
 titMtnPalB  DWORD MTN_PAL DUP (?)
 titMtnA     WORD SCR_W DUP (?)
 titMtnB     WORD SCR_W DUP (?)
-titRowPal   DWORD 256 DUP (?)
-titOff      DWORD 256 DUP (?)
+titRowPal   DWORD TITLE_ROWS DUP (?)
+titOff      DWORD TITLE_ROWS DUP (?)
+titInkTop   DWORD ?                       ; first non-empty glyph row
+titInkEnd   DWORD ?                       ; exclusive last non-empty glyph row
+titSubRow   DWORD ?                       ; subtitle mask origin, derived from the title
+ALIGN 8
 titMask     BYTE 16 DUP (?)               ; TXMASK: title
 titGlow     BYTE 16 DUP (?)               ; TXMASK: blurred title
+titOutline  BYTE 16 DUP (?)               ; TXMASK: 1 px dilation, built once at init
 titSub      BYTE 16 DUP (?)
 titHeartGlow BYTE 16 DUP (?)              ; TXMASK: blurred heart of the credit line
 titSunGlow  BYTE 16 DUP (?)
@@ -263,19 +274,59 @@ ml_v2:
 FN_END Tit_MtnLayer
 
 ; ---------------------------------------------------------------------------
-; Tit_BuildTexts - title, glow, chrome row colours, subtitle and the credit line.
+; Tit_BuildTitle - a large, width-fitted wordmark without bitmap resampling.
 ; ---------------------------------------------------------------------------
-FN_BEGIN Tit_BuildTexts, 0
+FN_BEGIN Tit_BuildTitle, 0
     lea  rsi, titReq
-    TIT_FONT titMask, szTitle, 50, 900, 0, 1, 3
+    TIT_FONT titMask, szTitle, TITLE_EM, 900, 0, 1, 1
+    lea  rcx, titReq
+    mov  edx, TITLE_MAX_W
+    mov  r8d, TITLE_ROWS
+    mov  r9d, TITLE_MIN
+    call Font_FitMask
+    FN_RET
+FN_END Tit_BuildTitle
+
+; ---------------------------------------------------------------------------
+; Tit_TitleMetrics - chrome over the actual ink, optical centre and subtitle.
+; ---------------------------------------------------------------------------
+FN_BEGIN Tit_TitleMetrics, 0
     lea  rcx, titMask
-    lea  rdx, titGlow
-    mov  r8d, 7
-    call Font_Glow
-    lea  rcx, titMask                      ; chrome gradient over the glyph body
     lea  rdx, titRowPal
     lea  r8, titChromeKeys
-    call Font_RowPal
+    call Font_RowPalInk
+    mov  titInkTop, eax
+    mov  titInkEnd, edx
+    add  eax, edx
+    shr  eax, 1
+    mov  ecx, TXT_CY
+    sub  ecx, eax
+    add  ecx, edx
+    add  ecx, TITLE_SUB_GAP - FONT_PAD
+    mov  titSubRow, ecx
+    FN_RET
+FN_END Tit_TitleMetrics
+
+; ---------------------------------------------------------------------------
+; Tit_BuildOutline - shares the wordmark contour operation with the finale.
+; ---------------------------------------------------------------------------
+LEAF_BEGIN Tit_BuildOutline
+    lea  rcx, titMask
+    lea  rdx, titOutline
+    jmp  Font_Outline
+LEAF_END Tit_BuildOutline
+
+; ---------------------------------------------------------------------------
+; Tit_BuildTexts - title, outline, glow, chrome, subtitle and credit line.
+; ---------------------------------------------------------------------------
+FN_BEGIN Tit_BuildTexts, 0
+    call Tit_BuildTitle
+    call Tit_TitleMetrics
+    call Tit_BuildOutline
+    lea  rcx, titMask
+    lea  rdx, titGlow
+    mov  r8d, TITLE_GLOW_R
+    call Font_Glow
     lea  rsi, titReq
     TIT_FONT titSub, szSub, 20, 500, 1, 0, 7
     call Sig_Init                          ; "created with <heart> by Paul Deecalov (c) 2026"
@@ -945,9 +996,9 @@ gv_next:
 FN_END Tit_GridV
 
 ; ---------------------------------------------------------------------------
-; Tit_Title(rcx = fb, edx = t) - dark halo, neon glow and the chrome letters.
-; During the glitch phase blocks of rows are displaced sideways and some
-; frames are dimmed; afterwards the title settles and bobs gently.
+; Tit_Title(rcx = fb, edx = t) - hard shadow, compact neon, outline and chrome.
+; The entrance keeps its row glitches; afterwards the wordmark is pixel-stable.
+; Every layer shares titOff so the outline never separates during a glitch.
 ; ---------------------------------------------------------------------------
 FN_BEGIN Tit_Title, 0
     mov  r12, rcx
@@ -1008,7 +1059,7 @@ tt_store:
     inc  ebx
     cmp  ebx, esi
     jb   tt_row
-    mov  eax, r13d                         ; vertical bob
+    mov  eax, r13d                         ; vertical bob fades out with the glitch
     imul eax, 3
     shr  eax, 2
     and  eax, 4095
@@ -1016,7 +1067,10 @@ tt_store:
     movsx eax, WORD PTR [rcx+rax*2]
     imul eax, 3
     sar  eax, 15
-    mov  edx, esi
+    imul eax, r15d
+    sar  eax, 8                            ; no whole-pixel jitter after the entrance
+    mov  edx, titInkTop
+    add  edx, titInkEnd
     shr  edx, 1
     sub  eax, edx
     add  eax, TXT_CY
@@ -1025,11 +1079,13 @@ tt_store:
     mov  eax, DWORD PTR [rax+TXMASK.w]
     mov  edx, SCR_W
     sub  edx, eax
-    shr  edx, 1
+    sar  edx, 1                            ; signed centring remains safe if layout changes
     mov  edi, edx                          ; left column
-    imul ebx, r14d, 200
-    shr  ebx, 8                            ; halo opacity
-    DM_FILL titGlow, edi, esi, 00080018h, ebx, 0
+    imul ebx, r14d, 220
+    shr  ebx, 8                            ; crisp drop shadow
+    lea  r10d, [rdi+1]
+    lea  r11d, [rsi+3]
+    DM_FILL titOutline, r10d, r11d, 00080018h, ebx, 0
     lea  rax, titDm
     lea  rcx, titOff
     mov  QWORD PTR [rax+DMASK.rowOff], rcx
@@ -1037,12 +1093,15 @@ tt_store:
     mov  rcx, rax
     call Gfx_DrawMask
     mov  ebx, gKick
-    imul ebx, 110
+    imul ebx, 64
     shr  ebx, 8
-    add  ebx, 70                           ; 70..180 on the beat
+    add  ebx, 52                           ; 52..116: restrained glow preserves letter edges
     imul ebx, r14d
     shr  ebx, 8                            ; neon opacity
     DM_FILL titGlow, edi, esi, 00FF3CB4h, ebx, 1
+    lea  rcx, titDm
+    call Gfx_DrawMask
+    DM_FILL titOutline, edi, esi, 00080018h, r14d, 0
     lea  rcx, titDm
     call Gfx_DrawMask
     DM_FILL titMask, edi, esi, 00FFFFFFh, r14d, 0
@@ -1152,7 +1211,7 @@ FN_BEGIN Tit_Captions, 0
     mov  r9d, eax
     mov  rcx, r12
     lea  rdx, titSub
-    mov  r8d, TXT_CY + 28
+    mov  r8d, titSubRow                    ; follows the measured title, never overlaps
     mov  r10d, 00C8F4FFh
     call Tit_Caption
     mov  ecx, r13d

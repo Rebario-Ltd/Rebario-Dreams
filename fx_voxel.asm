@@ -24,6 +24,10 @@ CLEAR_H    EQU 7680                      ; safety margin above the terrain: 30 c
 CLEAR_N    EQU 11                        ; number of probe points around the camera
 CR_TITLE_AT EQU 10200                    ; credits timing (scene ms)
 CR_SUB_AT   EQU 11400
+CR_TITLE_EM EQU 64                       ; same large face / tight tracking as the intro
+CR_TITLE_MAX_W EQU SCR_W - 32
+CR_TITLE_ROWS EQU 256
+CR_TITLE_MIN EQU 32
 CR_LINE_AT  EQU 12300
 
 VDM MACRO txm:REQ, px:REQ, py:REQ, col:REQ, alp:REQ, md:REQ
@@ -79,12 +83,12 @@ vxPathH     DWORD PATH_N DUP (?)
 vxPathM     DWORD PATH_N DUP (?)         ; terrain clearance signal (before smoothing)
 vxMTitle    BYTE 16 DUP (?)              ; TXMASK
 vxMSub      BYTE 16 DUP (?)
-vxHTitle    BYTE 16 DUP (?)              ; blurred masks
+vxHTitle    BYTE 16 DUP (?)              ; sharp 1 px title contour (other halos stay blurred)
 vxHSub      BYTE 16 DUP (?)
 vxHLine     BYTE 16 DUP (?)              ; ... of the text of the credit line (sigText)
 vxHHeart    BYTE 16 DUP (?)              ; ... and of its heart (sigHeart)
 vxTxtPos    DWORD 6 DUP (?)              ; x, y of title / sub / credit line
-vxGoldPal   DWORD 256 DUP (?)            ; row colours of the title
+vxGoldPal   DWORD CR_TITLE_ROWS DUP (?)            ; row colours of the title
 vxReq       BYTE 48 DUP (?)
 vxDm        BYTE 64 DUP (?)
 
@@ -387,18 +391,22 @@ cm_done:
 FN_END Vox_Camera
 
 ; ---------------------------------------------------------------------------
-; Vox_BuildTexts - credit masks, blurred shadows, positions, title colours.
+; Vox_BuildTexts - credit masks, title contour, caption halos and ink colours.
 ; ---------------------------------------------------------------------------
 FN_BEGIN Vox_BuildTexts, 0
     lea  rsi, vxReq
-    VFONT vxMTitle, szCrTitle, 56, 900, 0, 1, 4
+    VFONT vxMTitle, szCrTitle, CR_TITLE_EM, 900, 0, 1, 1
+    lea  rcx, vxReq
+    mov  edx, CR_TITLE_MAX_W
+    mov  r8d, CR_TITLE_ROWS
+    mov  r9d, CR_TITLE_MIN
+    call Font_FitMask
     lea  rsi, vxReq
     VFONT vxMSub, szCrSub, 22, 500, 1, 0, 9
     call Sig_Init                          ; "created with <heart> by Paul Deecalov (c) 2026"
     lea  rcx, vxMTitle
     lea  rdx, vxHTitle
-    mov  r8d, 8
-    call Font_Glow
+    call Font_Outline
     lea  rcx, vxMSub
     lea  rdx, vxHSub
     mov  r8d, 6
@@ -414,11 +422,16 @@ FN_BEGIN Vox_BuildTexts, 0
     lea  rcx, vxMTitle
     lea  rdx, vxGoldPal
     lea  r8, vxGoldKeys
-    call Font_RowPal
+    call Font_RowPalInk
+    add  eax, edx
+    shr  eax, 1
+    mov  ebp, 142
+    sub  ebp, eax                         ; centre the visible ink, not GDI's line box
     lea  rsi, vxTxtPos
     lea  rdi, vxMTitle
     mov  r8d, 142
     call Vox_Place
+    mov  DWORD PTR [rsi-4], ebp           ; replace only the title's y coordinate
     lea  rdi, vxMSub
     mov  r8d, 200
     call Vox_Place
@@ -435,7 +448,7 @@ FN_END Vox_BuildTexts
 LEAF_BEGIN Vox_Place
     mov  eax, SCR_W
     sub  eax, DWORD PTR [rdi+TXMASK.w]
-    shr  eax, 1
+    sar  eax, 1                           ; negative x remains a signed clipping coordinate
     mov  DWORD PTR [rsi], eax
     mov  eax, DWORD PTR [rdi+TXMASK.h]
     shr  eax, 1
@@ -448,7 +461,7 @@ LEAF_END Vox_Place
 
 ; ---------------------------------------------------------------------------
 ; Vox_CreditLine(rcx = fb, edx = scene ms, r8d = start, r9d = slot) - one line.
-; Slots: 0 title (chrome + glow), 1 subtitle, 2 credit line (text, then heart).
+; Slots: 0 title (gold + sharp contour), 1 subtitle, 2 credit line (text, then heart).
 ; ---------------------------------------------------------------------------
 FN_BEGIN Vox_CreditLine, 0
     mov  r12, rcx
@@ -472,7 +485,7 @@ FN_BEGIN Vox_CreditLine, 0
     cmp  r14d, 1
     ja   cl_h2
     je   cl_h1
-    VDM  vxHTitle, vxTxtX, vxTxtY, 00180A20h, ebx, 0
+    VDM  vxHTitle, vxTxtX, vxTxtY, 00180A20h, r13d, 0 ; crisp contour at the title opacity
     jmp  cl_halo
 cl_h1:
     VDM  vxHSub, vxTxtX, vxTxtY, 00180A20h, ebx, 0
